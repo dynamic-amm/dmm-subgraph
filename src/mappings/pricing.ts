@@ -124,12 +124,47 @@ export function findEthPerToken(token: Token): BigDecimal {
   if (token.id == WETH_ADDRESS) {
     return ONE_BD
   }
+
+  let totalPoolPrice = ZERO_BD
+  let totalTokenVReserve = ZERO_BD
+
   // loop through whitelist and check if paired with any
   for (let i = 0; i < WHITELIST.length; ++i) {
     let arrayPoolAddresses = factoryContract.getPools(Address.fromString(token.id), Address.fromString(WHITELIST[i]))
     if (arrayPoolAddresses) {
-      let totalPoolPrice = ZERO_BD
-      let totalPoolNum = ZERO_BD
+      // Get total vReserve of token in all pools to calculate the weight of pool later
+      for (let j = 0; j < arrayPoolAddresses.length; ++j) {
+        let pool = Pool.load(arrayPoolAddresses[j].toHexString())
+
+        // there is a case when 2 pools are created at the same blocks
+        // so the 2nd pool is not exist in the storage yet
+        if (pool === null) continue
+
+        // if pool is just created, skip it
+        if (pool.vReserve0.equals(ZERO_BD) && pool.vReserve1.equals(ZERO_BD)) continue
+
+        let percentToken0 = pool.reserve0
+          .div(pool.vReserve0)
+          .times(BD_100)
+          .div(pool.reserve0.div(pool.vReserve0).plus(pool.reserve1.div(pool.vReserve1)))
+
+        if (percentToken0.gt(BD_90) || percentToken0.lt(BD_10)) continue
+
+        if (pool.token0 == token.id && pool.reserveETH.gt(MINIMUM_LIQUIDITY_THRESHOLD_ETH)) {
+          totalTokenVReserve = totalTokenVReserve.plus(pool.vReserve0)
+        }
+
+        if (pool.token1 == token.id && pool.reserveETH.gt(MINIMUM_LIQUIDITY_THRESHOLD_ETH)) {
+          totalTokenVReserve = totalTokenVReserve.plus(pool.vReserve1)
+        }
+      }
+    }
+  }
+
+  // loop through whitelist and check if paired with any
+  for (let i = 0; i < WHITELIST.length; ++i) {
+    let arrayPoolAddresses = factoryContract.getPools(Address.fromString(token.id), Address.fromString(WHITELIST[i]))
+    if (arrayPoolAddresses) {
       for (let j = 0; j < arrayPoolAddresses.length; ++j) {
         let pool = Pool.load(arrayPoolAddresses[j].toHexString())
         // there is a case when 2 pools are created at the same blocks
@@ -152,8 +187,8 @@ export function findEthPerToken(token: Token): BigDecimal {
             continue
           }
           let tokenPrice = pool.token1Price.times(token1.derivedETH)
-          totalPoolPrice = totalPoolPrice.plus(tokenPrice) // return token1 per our token * Eth per token 1
-          totalPoolNum = totalPoolNum.plus(ONE_BD)
+          let poolWeight = pool.vReserve0.div(totalTokenVReserve)
+          totalPoolPrice = totalPoolPrice.plus(tokenPrice.times(poolWeight))
         }
         if (pool.token1 == token.id && pool.reserveETH.gt(MINIMUM_LIQUIDITY_THRESHOLD_ETH)) {
           let token0 = Token.load(pool.token0)
@@ -161,16 +196,15 @@ export function findEthPerToken(token: Token): BigDecimal {
             continue
           }
           let tokenPrice = pool.token0Price.times(token0.derivedETH)
-          totalPoolPrice = totalPoolPrice.plus(tokenPrice) // return token0 per our token * ETH per token 0
-          totalPoolNum = totalPoolNum.plus(ONE_BD)
+          let poolWeight = pool.vReserve1.div(totalTokenVReserve)
+          totalPoolPrice = totalPoolPrice.plus(tokenPrice.times(poolWeight))
         }
-      }
-      if (totalPoolNum.gt(ZERO_BD)) {
-        return totalPoolPrice.div(totalPoolNum)
       }
     }
   }
-  return ZERO_BD // nothing was found return 0
+
+  return totalPoolPrice
+  // return ZERO_BD // nothing was found return 0
 }
 
 /**
